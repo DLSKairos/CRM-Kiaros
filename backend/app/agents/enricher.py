@@ -84,6 +84,9 @@ Devuelve **exclusivamente** un JSON con este formato:
 - El campo `contexto_adicional` es oro: certifications ISO, proyectos activos, noticias de accidentes, expansiones — incluye todo lo relevante para personalizar el mensaje
 - Si no encuentras ningún contacto para una empresa, incluye la empresa con `"contactos": []` — no la elimines
 - Máximo 3 contactos por empresa; prioriza por el orden de la tabla de cargos
+- **Nunca construyas URLs de LinkedIn manualmente** — construir una URL como `linkedin.com/in/juan-perez-hse` es inventar datos. Solo visita URLs de LinkedIn que aparecieron literalmente en los resultados de un `web_search` previo.
+- **Si una URL da error 404 o "not found"**, no pruebes rutas alternativas en ese dominio. Haz un `web_search` nuevo con el nombre de la persona y la empresa para encontrarla de otra forma.
+- **No hagas `web_fetch` a URLs de redes sociales** (facebook.com, instagram.com, twitter.com, x.com, youtube.com) — estas siempre bloquean crawlers y retornan 400/403. Usa solo el snippet del resultado de búsqueda para esas fuentes.
 """.strip()
 
 
@@ -91,7 +94,8 @@ class LeadEnricher(AgentBase):
     """Enriquece empresas con contactos clave y contexto operacional."""
 
     anthropic_model = "claude-haiku-4-5-20251001"
-    groq_model = "llama-3.1-8b-instant"
+    groq_model = "llama-3.3-70b-versatile"
+    max_tool_calls: int = 8
 
     @property
     def system_prompt(self) -> str:

@@ -357,6 +357,7 @@ class AgentBase(ABC):
             # simultáneas que inundan el contexto y causan 413 Payload Too Large
             payload["parallel_tool_calls"] = False
 
+        last_status: int | None = None
         for attempt in range(6):
             resp = client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
@@ -368,17 +369,20 @@ class AgentBase(ABC):
             )
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("retry-after", min(60, 5 * (attempt + 1))))
+                last_status = resp.status_code
                 time.sleep(retry_after)
                 continue
             if resp.status_code == 413:
                 # Eliminar los tool results más viejos completos (no truncar)
                 messages = self._trim_groq_context(messages)
                 payload["messages"] = messages
+                last_status = resp.status_code
                 time.sleep(2)
                 continue
             resp.raise_for_status()
+            time.sleep(2)  # cooldown preventivo: evita agotar el bucket tokens/min de Groq
             return resp
-        raise RuntimeError("Groq sigue devolviendo rate limit tras 6 intentos")
+        raise RuntimeError(f"Groq no respondió tras 6 intentos (último status HTTP: {last_status})")
 
     @staticmethod
     def _trim_groq_context(messages: list[dict]) -> list[dict]:

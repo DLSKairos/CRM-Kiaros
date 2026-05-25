@@ -43,6 +43,7 @@ Si necesitas más empresas, haz más `web_search` con queries diferentes. Varía
 - **NUNCA construyas URLs manualmente** para directorios. Si quieres encontrar el directorio de Camacol, busca: `web_search("Camacol directorio afiliados constructoras")` y visita la URL que aparezca en los resultados.
 - **Si una URL da error 404 o "not found"**, no intentes rutas alternativas en ese mismo dominio. Haz un `web_search` nuevo para encontrar la información de otra forma.
 - **No repitas la misma búsqueda** que ya hiciste. Si ya buscaste "constructoras Bogotá", busca algo diferente: "obras civiles Cundinamarca", "empresas construcción infraestructura".
+- **No hagas `web_fetch` a URLs de redes sociales** (facebook.com, instagram.com, twitter.com, x.com, youtube.com) — siempre retornan 400/403 para crawlers. Usa solo el snippet del resultado de búsqueda de Tavily para esas fuentes.
 - Usa máximo 2 `web_fetch` por cada `web_search` que hagas.
 
 ## Criterios de inclusión

@@ -49,6 +49,13 @@ def _update_run(session, run: Run, **kwargs) -> None:
     session.commit()
 
 
+def _is_cancelled(session, run_uuid: uuid.UUID) -> bool:
+    """Verifica si el run fue cancelado desde la DB (lectura fresca, no cacheada)."""
+    session.expire_all()
+    run = session.get(Run, run_uuid)
+    return run is not None and run.status == "cancelled"
+
+
 # ── Persistencia de datos de agentes en DB ─────────────────────────────────────
 
 def _save_companies(session, run_id: uuid.UUID, empresas: list[dict], enriched_map: dict) -> dict[str, uuid.UUID]:
@@ -216,6 +223,10 @@ def run_prospecting_pipeline(self, run_id: str) -> dict:
 
         # ── STEP 1: Researcher ─────────────────────────────────────────────────
         _log(session, run_uuid, "researcher", "info", f"Iniciando búsqueda: {run.sector} en {run.ciudad}")
+        if _is_cancelled(session, run_uuid):
+            _log(session, run_uuid, "pipeline", "info", "Run cancelado por el usuario")
+            _publish(run_id, "cancelled", {"message": "Run cancelado por el usuario"})
+            return {"status": "cancelled", "run_id": run_id}
         try:
             researcher = LeadResearcher()
             research_result = researcher.research(
@@ -239,6 +250,10 @@ def run_prospecting_pipeline(self, run_id: str) -> dict:
         _publish(run_id, "step_start", {"step": "enricher", "progress": 25, "message": "Buscando contactos y contexto..."})
         _log(session, run_uuid, "enricher", "info", "Iniciando enriquecimiento")
 
+        if _is_cancelled(session, run_uuid):
+            _log(session, run_uuid, "pipeline", "info", "Run cancelado por el usuario")
+            _publish(run_id, "cancelled", {"message": "Run cancelado por el usuario"})
+            return {"status": "cancelled", "run_id": run_id}
         try:
             enricher = LeadEnricher()
             enrich_result = enricher.enrich(empresas_raw)
@@ -275,6 +290,10 @@ def run_prospecting_pipeline(self, run_id: str) -> dict:
         _publish(run_id, "step_start", {"step": "scorer", "progress": 45, "message": "Calificando leads..."})
         _log(session, run_uuid, "scorer", "info", "Iniciando scoring")
 
+        if _is_cancelled(session, run_uuid):
+            _log(session, run_uuid, "pipeline", "info", "Run cancelado por el usuario")
+            _publish(run_id, "cancelled", {"message": "Run cancelado por el usuario"})
+            return {"status": "cancelled", "run_id": run_id}
         try:
             scorer = LeadScorer()
             score_result = scorer.score(empresas_raw)
@@ -335,6 +354,10 @@ def run_prospecting_pipeline(self, run_id: str) -> dict:
 
         mensajes_list: list[dict] = []
         if leads_con_contexto:
+            if _is_cancelled(session, run_uuid):
+                _log(session, run_uuid, "pipeline", "info", "Run cancelado por el usuario")
+                _publish(run_id, "cancelled", {"message": "Run cancelado por el usuario"})
+                return {"status": "cancelled", "run_id": run_id}
             try:
                 writer = MessageWriter()
                 write_result = writer.write(leads_con_contexto)
@@ -356,6 +379,10 @@ def run_prospecting_pipeline(self, run_id: str) -> dict:
         _publish(run_id, "step_start", {"step": "crm_exporter", "progress": 85, "message": "Generando Excel..."})
         _log(session, run_uuid, "crm_exporter", "info", "Generando Excel")
 
+        if _is_cancelled(session, run_uuid):
+            _log(session, run_uuid, "pipeline", "info", "Run cancelado por el usuario")
+            _publish(run_id, "cancelled", {"message": "Run cancelado por el usuario"})
+            return {"status": "cancelled", "run_id": run_id}
         try:
             exporter = CRMExporter(output_dir=settings.output_dir)
             excel_path = exporter.export(

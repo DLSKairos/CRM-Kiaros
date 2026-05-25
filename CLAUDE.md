@@ -789,3 +789,152 @@ docker compose exec backend alembic upgrade head
 # Verificar que el backend responde
 curl http://localhost:8000/health
 ```
+
+---
+
+## 15. Bugs Detectados en Monitoreo Live — 2026-05-25 (tercera sesión)
+
+> Observados monitoreando dos runs reales consecutivos con el sistema de logs en vivo (backend + worker simultáneos).
+> El primer run falló a los 463s. El segundo fue cancelado manualmente tras confirmar el patrón.
+> Todos los bugs fueron corregidos en la misma sesión con 3 agentes en paralelo.
+
+### Bug F — `LeadEnricher` usaba `llama-3.1-8b-instant` (modelo 8B)
+
+**Archivo:** `backend/app/agents/enricher.py`, línea 94
+
+**Síntomas observados:**
+- URLs de LinkedIn completamente inventadas: `linkedin.com/in/luis-rodriguez-hse`, `linkedin.com/in/juan-perez-hse`, `linkedin.com/in/carlos-garcia-cto` — todas retornaban HTTP 999 (bloqueo de LinkedIn por bot)
+- La URL `constructoraabc.com/quienes-somos` fue intentada **5 veces consecutivas** con 404 en cada intento
+- El contexto acumulado de errores repetidos causó cascadas de 413 Payload Too Large en Groq
+- El pipeline falló a los 463s con error en el enricher (segundo step)
+
+**Causa:** El researcher fue migrado a `llama-3.3-70b-versatile` (fix Bug 2, sesión anterior), pero el enricher quedó con `llama-3.1-8b-instant`. El modelo 8B no tiene capacidad de razonamiento para:
+1. Entender que construir URLs de LinkedIn sin haberlas encontrado en búsqueda es inventar datos
+2. Inferir que si una URL dio 404, sus variantes en el mismo dominio también fallarán
+
+**Fix:**
+```python
+# enricher.py
+groq_model = "llama-3.3-70b-versatile"  # era: llama-3.1-8b-instant
+max_tool_calls: int = 8                  # override del default 12 del AgentBase
+```
+Además se agregaron 3 reglas al prompt `_SYSTEM` del enricher:
+- Prohibición de construir URLs de LinkedIn manualmente
+- Comportamiento ante 404: usar `web_search` en lugar de probar variantes del mismo dominio
+- Prohibición de `web_fetch` a redes sociales (facebook.com, instagram.com, twitter.com, x.com, youtube.com)
+
+---
+
+### Bug G — 429 Rate Limit en cascada por falta de cooldown entre requests exitosos
+
+**Archivo:** `backend/app/agents/base.py`, método `_groq_post`
+
+**Síntomas observados:** Patrón repetido en el segundo run:
+```
+20:24:00 — Groq 200 OK
+20:24:02 — Tavily 200 OK
+20:24:02 — Groq 429 (0.3s después del 200 OK anterior)
+20:24:29 — Groq 200 OK (recuperado tras 27s)
+20:24:29 — Tavily 200 OK
+20:24:29 — Groq 429 (inmediato, 0.2s)
+```
+5 errores 429 en 2 minutos. El pipeline completaba ~1 tool call real por cada par de 429s.
+
+**Causa:** El free tier de Groq tiene un límite estricto de tokens/minuto con `llama-3.3-70b-versatile`. El contexto acumulado consume el bucket completo en cada request. Al volver de un tool call, el siguiente request a Groq encuentra el bucket vacío. El código solo tenía `time.sleep` después de los 429s (reactivo), no entre los 200 OK (preventivo).
+
+**Fix:** Agregar `time.sleep(2)` justo antes del `return resp` en `_groq_post`, aplicado únicamente a respuestas exitosas:
+```python
+resp.raise_for_status()
+time.sleep(2)  # cooldown preventivo: evita agotar el bucket tokens/min de Groq
+return resp
+```
+Costo máximo: 8 tool calls × 2s = 16s adicionales por agente. Beneficio: elimina la cascada de 429s.
+
+---
+
+### Bug H — Mensaje de error "rate limit" para errores 413
+
+**Archivo:** `backend/app/agents/base.py`, línea 381 (antes del fix)
+
+**Síntomas:** El run falló con: `'Falló tras 5 intentos: Groq sigue devolviendo rate limit tras 6 intentos'`
+Los logs del worker mostraban claramente 6 × HTTP 413 (Payload Too Large), no 429 (Rate Limit).
+
+**Causa:** El mensaje de error era estático y no distinguía entre los dos tipos de error que maneja `_groq_post`.
+
+**Fix:** Trackear el último status code en el loop de reintentos:
+```python
+last_status: int | None = None
+# En bloque 429: last_status = resp.status_code
+# En bloque 413: last_status = resp.status_code
+raise RuntimeError(f"Groq no respondió tras 6 intentos (último status HTTP: {last_status})")
+```
+
+---
+
+### Bug I — `web_fetch` a URLs de redes sociales (Facebook, LinkedIn)
+
+**Archivos:** `backend/app/agents/researcher.py` y `backend/app/agents/enricher.py` (prompts)
+
+**Síntomas observados:**
+- `facebook.com/PerimetralOrientaldeBogota/posts/...` → HTTP 400 Bad Request (researcher)
+- `linkedin.com/in/carlos-rodriguez-hse` → HTTP 301 + HTTP 999 (enricher, URLs inventadas)
+- `linkedin.com/in/juan-perez-hse/` → HTTP 999 (enricher)
+
+**Causa:** Los agentes no tenían instrucción explícita de evitar hacer `web_fetch` a redes sociales. Facebook siempre retorna 400/403 para crawlers. LinkedIn retorna 999 para cualquier acceso no autenticado. Cada intento consume un tool call y añade un error al contexto.
+
+**Fix:** Agregar en el bloque `## Reglas críticas` de ambos prompts:
+```
+- No hagas `web_fetch` a URLs de redes sociales (facebook.com, instagram.com,
+  twitter.com, x.com, youtube.com) — siempre retornan 400/403 para crawlers.
+  Usa solo el snippet del resultado de búsqueda de Tavily para esas fuentes.
+```
+
+---
+
+### Bug J — Cancelar un run desde el frontend no detiene el worker Celery
+
+**Archivo:** `backend/app/tasks/pipeline.py`
+
+**Síntomas:** Al hacer `DELETE /runs/{id}` desde el frontend, el backend marcaba el run como `status="cancelled"` en la DB (200 OK), pero el worker Celery continuaba ejecutando el pipeline hasta terminar o fallar por otro motivo. No había forma de detener el pipeline a mitad de ejecución.
+
+**Causa:** El pipeline de Celery es una sola task (`run_prospecting_pipeline`) que no verificaba el estado del run entre steps. Una vez encolada, Celery no tiene mecanismo nativo de cancelación para tasks en ejecución sin herramientas externas como `celery.control.revoke`.
+
+**Fix:** Agregar helper `_is_cancelled` y checkpoints al inicio de cada step:
+```python
+def _is_cancelled(session, run_uuid: uuid.UUID) -> bool:
+    """Verifica si el run fue cancelado desde la DB (lectura fresca, no cacheada)."""
+    session.expire_all()  # forzar re-lectura desde DB, no caché de SQLAlchemy
+    run = session.get(Run, run_uuid)
+    return run is not None and run.status == "cancelled"
+```
+Patrón insertado en los 5 checkpoints (antes de cada agente):
+```python
+if _is_cancelled(session, run_uuid):
+    _log(session, run_uuid, "pipeline", "info", "Run cancelado por el usuario")
+    _publish(run_id, "cancelled", {"message": "Run cancelado por el usuario"})
+    return {"status": "cancelled", "run_id": run_id}
+```
+El worker detecta la cancelación en el siguiente checkpoint (máximo ~30s de latencia desde el DELETE).
+
+---
+
+### ✅ Fase 7 — Corrección de bugs del Enricher + Rate Limiting + Cancelación (COMPLETADA)
+
+**Archivos modificados:**
+- `backend/app/agents/enricher.py` — modelo, max_tool_calls, reglas de prompt
+- `backend/app/agents/researcher.py` — regla no-web-fetch a redes sociales
+- `backend/app/agents/base.py` — cooldown preventivo + error message descriptivo
+- `backend/app/tasks/pipeline.py` — helper `_is_cancelled` + 5 checkpoints
+
+**Checklist:**
+- [x] **enricher.py:** Cambiar `groq_model` a `llama-3.3-70b-versatile`
+- [x] **enricher.py:** Agregar `max_tool_calls: int = 8` override en la subclase
+- [x] **enricher.py:** Agregar regla "no construyas URLs de LinkedIn manualmente"
+- [x] **enricher.py:** Agregar regla "si 404, usa web_search, no repitas dominio"
+- [x] **enricher.py:** Agregar regla "no hagas web_fetch a redes sociales"
+- [x] **researcher.py:** Agregar regla "no hagas web_fetch a redes sociales"
+- [x] **base.py:** Agregar `time.sleep(2)` antes de `return resp` en `_groq_post`
+- [x] **base.py:** Trackear `last_status` y mejorar mensaje del `RuntimeError` final
+- [x] **pipeline.py:** Agregar función `_is_cancelled(session, run_uuid)`
+- [x] **pipeline.py:** Insertar check de cancelación antes de los 5 agentes
+- [x] Contenedores reconstruidos con `docker compose up -d --build backend worker`
