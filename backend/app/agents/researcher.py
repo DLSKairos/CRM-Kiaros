@@ -14,31 +14,36 @@ Recibirás:
 - `ciudad`: Bogotá D.C. y Cundinamarca (por defecto)
 - `cantidad_objetivo`: número de empresas a encontrar
 
-## Fuentes a consultar (en este orden de prioridad)
+## Proceso obligatorio — sigue este orden siempre
 
-1. **Web general con DuckDuckGo** — tu fuente principal. Queries como:
-   - `empresas constructoras Bogotá Colombia obras civiles HSEQ`
-   - `empresas minería carbón Cundinamarca Colombia operaciones campo`
-   - Usa variaciones para encontrar empresas distintas en cada búsqueda
+**Paso 1: Búsqueda con web_search (OBLIGATORIO — siempre empieza aquí)**
 
-2. **Directorios sectoriales** — URLs exactas verificadas:
-   - Construcción/Obras civiles: `https://camacol.co/nosotros/afiliados` (afiliados Camacol)
-   - Infraestructura: `https://infraestructura.org.co` (homepage, navega desde ahí)
-   - Oil & Gas: `https://acp.com.co` — busca sección "afiliados" o "empresas"
-   - Utilities: `https://andesco.org.co` — busca sección empresas asociadas
-   - Minería: `https://anm.gov.co` — registro nacional minero
+Usa `web_search` para encontrar empresas. Esto es tu herramienta principal. Empieza SIEMPRE con búsquedas antes de hacer cualquier otra cosa.
 
-3. **RUES** — busca vía DuckDuckGo: `site:rues.confecamaras.co [sector] Bogotá`
-   (el sitio no tiene buscador directo accessible, usa Google/DDG)
+Queries de búsqueda que funcionan bien:
+- `empresas constructoras Bogotá Colombia HSEQ permisos trabajo`
+- `constructoras medianas Bogotá obras civiles Colombia empleados campo`
+- `empresas minería Cundinamarca Colombia operaciones campo carbón`
+- `operadoras oil gas Colombia Bogotá HSE`
+- `empresas construcción infraestructura Cundinamarca afiliadas Camacol`
+- `"empresas asociadas" OR "afiliados" construcción Bogotá Colombia directorio`
 
-4. **LinkedIn** — NO intentes acceder directamente a linkedin.com (requiere login).
-   En cambio, busca perfiles de empresa vía DuckDuckGo:
-   - `site:linkedin.com/company "[sector]" Bogotá Colombia`
-   - `"linkedin.com/company" constructora Bogotá Colombia`
-   Extrae el nombre y URL del perfil desde los resultados de búsqueda sin visitar LinkedIn.
+Haz al menos 3-4 búsquedas variadas para obtener empresas distintas.
 
-5. **Páginas web de empresas** — una vez identificadas, visita su web con `web_fetch`
-   para validar que son reales y extraer datos básicos.
+**Paso 2: Visita webs que encontraste (solo URLs de los resultados de búsqueda)**
+
+Después de cada `web_search`, si encuentras URLs de empresas reales en los resultados, visita algunas con `web_fetch` para confirmar que son reales y extraer datos. Solo visita URLs que aparecieron en los resultados de búsqueda — nunca construyas URLs manualmente.
+
+**Paso 3: Búsquedas adicionales para llegar al objetivo**
+
+Si necesitas más empresas, haz más `web_search` con queries diferentes. Varía sector, tamaño, zona geográfica.
+
+## Reglas críticas
+
+- **NUNCA construyas URLs manualmente** para directorios. Si quieres encontrar el directorio de Camacol, busca: `web_search("Camacol directorio afiliados constructoras")` y visita la URL que aparezca en los resultados.
+- **Si una URL da error 404 o "not found"**, no intentes rutas alternativas en ese mismo dominio. Haz un `web_search` nuevo para encontrar la información de otra forma.
+- **No repitas la misma búsqueda** que ya hiciste. Si ya buscaste "constructoras Bogotá", busca algo diferente: "obras civiles Cundinamarca", "empresas construcción infraestructura".
+- Usa máximo 2 `web_fetch` por cada `web_search` que hagas.
 
 ## Criterios de inclusión
 
@@ -53,28 +58,9 @@ Excluir:
 - Empresas en liquidación o concordato
 - Empresas sin presencia digital mínima
 
-## Proceso de búsqueda
-
-Para cada fuente:
-1. Usa `web_search` con queries específicos (ej: `"constructoras Bogotá" "permisos de trabajo" site:co`)
-2. Usa `web_fetch` para extraer listados de directorios sectoriales
-3. Valida que la empresa sea real visitando brevemente su web
-4. Extrae los datos disponibles
-
-Queries de ejemplo útiles:
-- `constructoras medianas Bogotá Colombia obras civiles permisos trabajo`
-- `empresas minería carbón Cundinamarca Colombia operaciones campo`
-- `operadoras oil gas Colombia Bogotá HSE HSEQ`
-- `"HSE" OR "HSEQ" empresa construcción Bogotá Colombia`
-- `site:linkedin.com/company constructora Bogotá Colombia`
-- `empresas construcción infraestructura Cundinamarca Colombia empleados campo`
-
-**IMPORTANTE:** Usa máximo 2-3 búsquedas por fuente y avanza a la siguiente.
-No repitas búsquedas similares. Prioriza cantidad y variedad de empresas sobre profundidad.
-
 ## Output requerido
 
-Devuelve **exclusivamente** un JSON con este formato:
+Devuelve **exclusivamente** un JSON con este formato exacto:
 
 ```json
 {
@@ -90,23 +76,22 @@ Devuelve **exclusivamente** un JSON con este formato:
       "web": "https://constructoraxyz.com",
       "linkedin_empresa": "https://linkedin.com/company/constructora-xyz",
       "tamano_estimado": "50-200 empleados",
-      "fuente": "Camacol",
-      "url_fuente": "https://camacol.co/directorio/...",
+      "fuente": "DuckDuckGo",
+      "url_fuente": "https://constructoraxyz.com",
       "notas": "Empresa con proyectos activos en Soacha y Zipaquirá"
     }
   ],
-  "total_encontradas": 25,
-  "fuentes_consultadas": ["RUES", "Camacol", "LinkedIn"],
+  "total_encontradas": 10,
+  "fuentes_consultadas": ["DuckDuckGo", "camacol.co"],
   "sector_buscado": "construcción",
   "ciudad_buscada": "Bogotá D.C."
 }
 ```
 
-## Reglas estrictas
+## Reglas del output
 
 - Si no encuentras el NIT, deja el campo como `null` — no lo inventes
 - Si no hay LinkedIn de empresa, deja como `null`
-- El campo `fuente` debe ser el nombre del directorio o sitio donde la encontraste
 - No incluyas la misma empresa dos veces (deduplicar por nombre o NIT)
 - Busca hasta alcanzar `cantidad_objetivo`; si no llegas, reporta cuántas encontraste
 - No inventes empresas — solo incluye lo que verificaste con web_search/web_fetch
@@ -117,7 +102,10 @@ class LeadResearcher(AgentBase):
     """Busca empresas target en fuentes web gratuitas colombianas."""
 
     anthropic_model = "claude-haiku-4-5-20251001"
-    groq_model = "llama-3.1-8b-instant"  # 20k TPM vs 6k del 70B — más headroom para web search
+    groq_model = "llama-3.3-70b-versatile"
+
+    # Límite más bajo: 8 calls son suficientes para 3-4 búsquedas + validaciones
+    max_tool_calls: int = 8
 
     @property
     def system_prompt(self) -> str:
@@ -127,6 +115,6 @@ class LeadResearcher(AgentBase):
         user_message = (
             f"Busca empresas del sector **{sector}** en **{ciudad}**. "
             f"Necesito encontrar al menos {cantidad_objetivo} empresas que encajen con el ICP de SEÑAL. "
-            f"Consulta las fuentes en el orden indicado y devuelve el JSON requerido."
+            f"Empieza con web_search y devuelve el JSON requerido."
         )
         return self.run(user_message)

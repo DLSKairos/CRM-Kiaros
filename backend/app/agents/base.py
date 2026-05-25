@@ -90,18 +90,70 @@ def _strip_html(html: str, max_chars: int = 8000) -> str:
     return text[:max_chars]
 
 
+def _web_search_tavily(query: str, max_chars: int) -> str:
+    """Búsqueda via Tavily API. Lanza excepción si falla."""
+    with httpx.Client(timeout=20) as client:
+        resp = client.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": settings.tavily_api_key,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 8,
+                "include_raw_content": False,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        lines = [
+            f"[{r.get('title','')}] {r.get('url','')} — {r.get('content','')}"
+            for r in data.get("results", [])
+        ]
+        return "\n\n".join(lines)[:max_chars]
+
+
+def _web_search_duckduckgo(query: str, max_chars: int) -> str:
+    """Búsqueda via DuckDuckGo HTML (sin API key). Lanza excepción si falla."""
+    with httpx.Client(timeout=20, follow_redirects=True) as client:
+        resp = client.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query},
+            headers={**_HEADERS_BROWSER, "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        # Extraer resultados: título + URL + snippet
+        html = resp.text
+        results = re.findall(
+            r'class="result__title"[^>]*>.*?href="([^"]+)"[^>]*>(.*?)</a>.*?'
+            r'class="result__snippet"[^>]*>(.*?)</span>',
+            html, re.DOTALL
+        )
+        if not results:
+            # Fallback: extraer cualquier link con texto visible
+            links = re.findall(r'<a[^>]+href="(https?://[^"]+)"[^>]*>([^<]{10,})</a>', html)
+            lines = [f"{text.strip()} — {url}" for url, text in links[:10]]
+        else:
+            lines = [
+                f"[{re.sub('<[^>]+>', '', title).strip()}] {url} — {re.sub('<[^>]+>', '', snippet).strip()}"
+                for url, title, snippet in results[:8]
+            ]
+        return "\n\n".join(lines)[:max_chars]
+
+
 def _web_search(query: str, max_chars: int = 6000) -> str:
+    """Busca con Tavily; si falla, usa DuckDuckGo como fallback automático."""
+    # Intentar Tavily primero si hay API key configurada
+    if settings.tavily_api_key:
+        try:
+            return _web_search_tavily(query, max_chars)
+        except Exception:
+            pass  # Fallback a DuckDuckGo
+
+    # DuckDuckGo como fallback (o primario si no hay Tavily key)
     try:
-        with httpx.Client(timeout=20, follow_redirects=True) as client:
-            resp = client.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": query, "kl": "co-es"},
-                headers=_HEADERS_BROWSER,
-            )
-            resp.raise_for_status()
-            return _strip_html(resp.text, max_chars=max_chars)
+        return _web_search_duckduckgo(query, max_chars)
     except Exception as exc:
-        return f"[web_search error] {exc}"
+        return f"[web_search error] Tavily y DuckDuckGo fallaron: {exc}"
 
 
 def _web_fetch(url: str, max_chars: int = 8000) -> str:
@@ -155,11 +207,10 @@ class AgentBase(ABC):
 
     max_tokens: int = 4096
     max_retries: int = 5
-    # Máximo de tool calls por ejecución — evita bucles infinitos con Groq
     max_tool_calls: int = 12
-    # Tamaño máximo de contenido web enviado al LLM (Groq tiene límites de tokens más ajustados)
-    _groq_max_chars_search: int = 2000
-    _groq_max_chars_fetch: int = 2500
+    # Límites bajos para no llegar al 413 Payload Too Large de Groq
+    _groq_max_chars_search: int = 800
+    _groq_max_chars_fetch: int = 1000
 
     def __init__(self) -> None:
         self._provider = settings.ai_provider.lower()
@@ -278,22 +329,34 @@ class AgentBase(ABC):
                         })
                     messages.extend(tool_results)
 
-                    # Si superó el límite, forzar respuesta final con lo que tiene
+                    # Límite alcanzado: forzar respuesta final deshabilitando tools
                     if tool_calls_count >= self.max_tool_calls:
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "Has usado suficientes búsquedas. "
-                                "Devuelve AHORA el JSON final con los datos que encontraste. "
-                                "No hagas más búsquedas."
-                            ),
-                        })
+                        resp_final = self._groq_post(client, messages, tool_choice="none")
+                        final_content = resp_final.json()["choices"][0]["message"].get("content", "")
+                        return _extract_json(final_content)
+
                     continue
 
                 raise ValueError(f"finish_reason inesperado: {choice['finish_reason']}")
 
-    def _groq_post(self, client: httpx.Client, messages: list[dict]) -> httpx.Response:
+    def _groq_post(self, client: httpx.Client, messages: list[dict], tool_choice: str = "auto") -> httpx.Response:
         """POST a Groq con retry automático para 429 (rate limit) y 413 (payload)."""
+        payload: dict = {
+            "model": self.groq_model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "temperature": 0.3,
+        }
+        if tool_choice == "none":
+            # Sin tools — forzar respuesta de texto puro
+            payload["tool_choice"] = "none"
+        else:
+            payload["tools"] = _TOOLS_OPENAI
+            payload["tool_choice"] = "auto"
+            # Una herramienta por turno: evita que el modelo pida 20 búsquedas
+            # simultáneas que inundan el contexto y causan 413 Payload Too Large
+            payload["parallel_tool_calls"] = False
+
         for attempt in range(6):
             resp = client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
@@ -301,23 +364,16 @@ class AgentBase(ABC):
                     "Authorization": f"Bearer {settings.groq_api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": self.groq_model,
-                    "messages": messages,
-                    "tools": _TOOLS_OPENAI,
-                    "tool_choice": "auto",
-                    "max_tokens": self.max_tokens,
-                    "temperature": 0.3,
-                },
+                json=payload,
             )
             if resp.status_code == 429:
-                # Respetar Retry-After si viene en el header, si no usar backoff
                 retry_after = int(resp.headers.get("retry-after", min(60, 5 * (attempt + 1))))
                 time.sleep(retry_after)
                 continue
             if resp.status_code == 413:
-                # Contexto demasiado grande — truncar los tool results más viejos
+                # Eliminar los tool results más viejos completos (no truncar)
                 messages = self._trim_groq_context(messages)
+                payload["messages"] = messages
                 time.sleep(2)
                 continue
             resp.raise_for_status()
@@ -326,10 +382,34 @@ class AgentBase(ABC):
 
     @staticmethod
     def _trim_groq_context(messages: list[dict]) -> list[dict]:
-        """Reduce el tamaño del contexto truncando tool results antiguos al 50%."""
+        """Reduce el contexto en dos pasos para resolver 413 Payload Too Large.
+
+        Paso 1: trunca el contenido de TODOS los tool results a 300 chars.
+        Paso 2: si el contexto sigue siendo grande, elimina los tool result+assistant
+                pairs más viejos (50% de los existentes).
+        Esto preserva la historia de qué herramientas se llamaron pero reduce
+        drásticamente el payload enviado a Groq.
+        """
+        # Paso 1: truncar contenido de todos los tool results
         trimmed = []
-        for msg in messages:
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
-                msg = {**msg, "content": msg["content"][: len(msg["content"]) // 2] + "...[truncado]"}
-            trimmed.append(msg)
-        return trimmed
+        for m in messages:
+            if m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > 300:
+                m = {**m, "content": m["content"][:300] + "…[truncado]"}
+            trimmed.append(m)
+
+        # Estimar tamaño aproximado
+        total_chars = sum(len(str(m.get("content", ""))) for m in trimmed)
+        if total_chars <= 40_000:
+            return trimmed
+
+        # Paso 2: eliminar el 50% más viejo de pares assistant+tool
+        tool_indices = [i for i, m in enumerate(trimmed) if m.get("role") == "tool"]
+        if not tool_indices:
+            return trimmed
+
+        to_remove = max(1, len(tool_indices) // 2)
+        indices_to_drop = set(tool_indices[:to_remove])
+        first_drop = min(indices_to_drop)
+        if first_drop > 0 and trimmed[first_drop - 1].get("role") == "assistant":
+            indices_to_drop.add(first_drop - 1)
+        return [m for i, m in enumerate(trimmed) if i not in indices_to_drop]

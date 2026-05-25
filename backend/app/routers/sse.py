@@ -60,15 +60,23 @@ async def _event_generator(request: Request, run_id: str):
             if message and message.get("type") == "message":
                 data = message.get("data", "")
                 last_event_time = asyncio.get_event_loop().time()
-                yield f"data: {data}\n\n"
 
-                # Terminar si el pipeline completó o falló
+                # Mapear el evento interno al tipo de evento SSE que espera el frontend
                 try:
                     parsed = json.loads(data)
-                    if parsed.get("event") in ("completed", "failed"):
-                        break
+                    internal_event = parsed.get("event", "")
+                    sse_event = {
+                        "completed": "run_completed",
+                        "failed": "run_failed",
+                    }.get(internal_event, "run_update")
                 except (json.JSONDecodeError, AttributeError):
-                    pass
+                    internal_event = ""
+                    sse_event = "run_update"
+
+                yield f"event: {sse_event}\ndata: {data}\n\n"
+
+                if internal_event in ("completed", "failed"):
+                    break
 
             else:
                 # Heartbeat

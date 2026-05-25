@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Groq (gratuito — api.groq.com)
     groq_api_key: str = ""
 
+    # Tavily (búsqueda web para agentes — tavily.com)
+    tavily_api_key: str = ""
+
     # Notificaciones
     resend_api_key: str = ""
     resend_to_email: str = ""

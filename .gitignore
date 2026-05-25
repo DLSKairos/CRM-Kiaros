@@ -40,3 +40,5 @@ celerybeat.pid
 
 # Alembic
 backend/alembic/versions/*.pyc
+
+CLAUDE.md

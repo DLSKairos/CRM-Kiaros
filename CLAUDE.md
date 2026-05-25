@@ -425,12 +425,12 @@ POST /runs
 - [x] Migración Alembic `246e9c9b6842_initial_schema` generada y aplicada — 6 tablas en PostgreSQL
 
 **Notas de implementación:**
-- `web_search` usa DuckDuckGo HTML (`html.duckduckgo.com/html/`) — sin API key, gratuito
+- `web_search` usa **Tavily** (`api.tavily.com`) como primario + **DuckDuckGo HTML** como fallback automático si Tavily falla — requiere `TAVILY_API_KEY` en `.env`
 - `web_fetch` usa httpx con User-Agent de Chrome — sin API key
 - `AgentBase._agentic_loop` maneja el ciclo tool_use → end_turn completo
 - `CRMExporter` no es un agente LLM; genera el Excel directamente en Python
 - Los prompts de sistema viven en cada archivo `.py` como strings (no en los `.md` de `.claude/agents/`)
-- **Requiere:** `ANTHROPIC_API_KEY` en `.env` para que los agentes funcionen
+- **Requiere:** `ANTHROPIC_API_KEY` o `GROQ_API_KEY` según `AI_PROVIDER` en `.env`
 
 ### ✅ Fase 3 — Pipeline Celery completo (COMPLETADA)
 - [x] `tasks/pipeline.py` — orquesta los 5 agentes secuencialmente con checkpoints en DB
@@ -488,17 +488,286 @@ GET    /stats                         # Métricas dashboard
 
 ---
 
-## 11. Variables de Entorno Requeridas
+## 11. Bugs Críticos Detectados en Producción — Plan de Corrección
+
+> Observados el 2026-05-25 monitoreando un run real en vivo desde el frontend.
+> Todos los bugs están en el agente `researcher` y en el loop de Groq en `base.py`.
+> **Prioridad: corregir antes de cualquier run de prospección real.**
+
+### Bug 1 — URLs hardcodeadas en el prompt del researcher son 404
+
+**Archivo:** `backend/app/agents/researcher.py` (sección "Directorios sectoriales")
+
+**Síntomas observados:**
+- `acp.com.co/afiliados` → 404
+- `andesco.org.co/empresas-asociadas` → 404
+- `camacol.co/directorio/constructoras` → 404
+- `infraestructura.org.co/directorio/constructoras` → 404
+- Solo funcionaron: `camacol.co/nosotros/afiliados` y `infraestructura.org.co` (homepage)
+
+**Causa:** Las URLs están escritas a mano en el prompt y los sitios las cambiaron o nunca existieron con esas rutas.
+
+**Fix:** Eliminar todas las URLs hardcodeadas del prompt. Reemplazarlas por **queries de DuckDuckGo** que el agente ejecuta con `web_search`. El modelo descubrirá las URLs reales a partir de los resultados de búsqueda.
+
+```
+# Antes (prompt actual — frágil)
+web_fetch("https://acp.com.co/afiliados")
+
+# Después (robusto)
+web_search("ACP asociacion colombiana petroleo directorio empresas afiliadas site:acp.com.co")
+# → el modelo visita la URL real que encuentre en los resultados
+```
+
+---
+
+### Bug 2 — El researcher nunca usa DuckDuckGo (su fuente principal)
+
+**Archivo:** `backend/app/agents/researcher.py`
+
+**Síntomas observados:** En todo el run (12+ tool calls), cero llamados a `web_search`/DuckDuckGo. El modelo `llama-3.1-8b-instant` ignoró la instrucción "tu fuente principal" y fue directo a las URLs hardcodeadas.
+
+**Causa:** El modelo 8B no tiene suficiente capacidad de seguir instrucciones con jerarquía compleja. Al ver URLs explícitas en el prompt las usa primero, ignorando la prioridad declarada.
+
+**Fix (dos partes):**
+
+1. **Cambiar modelo del researcher** de `llama-3.1-8b-instant` a `llama-3.3-70b-versatile`. El 70B sigue instrucciones con mucha más fidelidad.
+
+   ```python
+   # researcher.py
+   groq_model = "llama-3.3-70b-versatile"  # era: llama-3.1-8b-instant
+   ```
+
+2. **Restructurar el prompt** para que la sección de DuckDuckGo sea la única instrucción de acción, y los directorios sean opcionales solo si los encuentra vía búsqueda:
+
+   ```
+   ## Proceso obligatorio
+   1. Usa SIEMPRE web_search como primer paso para cada empresa que busques
+   2. Solo visita con web_fetch URLs que encontraste en los resultados del web_search
+   3. Nunca intentes URLs que no aparecieron en una búsqueda previa
+   ```
+
+---
+
+### Bug 3 — `max_tool_calls` no detiene el loop (el modelo ignora el mensaje de "para")
+
+**Archivo:** `backend/app/agents/base.py`, método `_loop_groq`
+
+**Síntomas observados:** Al llegar al call 12, el código agrega el mensaje `"Devuelve AHORA el JSON..."` pero hace `continue` y vuelve al top del while. Groq retornó otro `tool_calls`, el modelo ignoró la instrucción, y el loop continuó indefinidamente.
+
+**Causa:** El guardia no rompe el loop — solo añade un mensaje que un modelo 8B ignora. El código actual:
+
+```python
+if tool_calls_count >= self.max_tool_calls:
+    messages.append({...stop message...})
+continue  # ← sigue en el loop aunque el modelo haga más tool_calls
+```
+
+**Fix:** Después del límite, forzar al menos un intento de respuesta final; si el modelo devuelve otro `tool_calls`, extraer el JSON del contexto acumulado o lanzar excepción controlada:
+
+```python
+if tool_calls_count >= self.max_tool_calls:
+    # Forzar 1 sola llamada final sin tools disponibles
+    response_final = client.post(..., json={..., "tool_choice": "none"})
+    return _extract_json(response_final.json()["choices"][0]["message"]["content"])
+```
+
+---
+
+### Bug 4 — 413 Payload Too Large de Groq destruye el contexto y reinicia las búsquedas
+
+**Archivo:** `backend/app/agents/base.py`, métodos `_groq_post` y `_trim_groq_context`
+
+**Síntomas observados:** A las 18:29 — 6 errores 413 consecutivos. El `_trim_groq_context` recortó los tool results al 50%, logró un 200 OK, pero el modelo **perdió la memoria de qué URLs ya visitó** y reinició las mismas búsquedas desde cero.
+
+**Causa:** `_trim_groq_context` trunca el texto de los resultados sin eliminar mensajes. El modelo ve mensajes de "visité esta URL" con contenido cortado y no entiende que ya terminó esa búsqueda.
+
+**Fix (tres partes):**
+
+1. **Reducir `_groq_max_chars_search` y `_groq_max_chars_fetch`** preventivamente para no llegar al 413:
+   ```python
+   _groq_max_chars_search: int = 1500  # era: 2000
+   _groq_max_chars_fetch: int = 2000   # era: 2500
+   ```
+
+2. **Mejorar `_trim_groq_context`** para eliminar tool results completos (no solo truncar) cuando el contexto es demasiado grande:
+   ```python
+   # Eliminar los tool results más viejos (no truncar) hasta caber en el límite
+   ```
+
+3. **Reducir `max_tool_calls` del researcher a 8** (era 12). Con 8 calls y páginas más cortas, el contexto nunca llega al 413.
+
+---
+
+### Bug 5 — El modelo repite exactamente las mismas URLs fallidas en bucle
+
+**Archivo:** `backend/app/agents/researcher.py` (prompt)
+
+**Síntomas observados:** `camacol.co/directorio/constructoras` fue intentado 3 veces con 404 en cada intento. El modelo no aprende de los 404s dentro de la misma sesión.
+
+**Causa:** El modelo 8B no tiene suficiente capacidad de razonamiento para inferir que si una URL dio 404, sus variantes en el mismo dominio también fallarán.
+
+**Fix:** Agregar en el prompt:
+```
+## Regla crítica sobre errores 404
+Si una URL devuelve error 404 o "not found", NO intentes otras rutas en el mismo dominio.
+En su lugar, haz un web_search para encontrar la URL correcta del sitio.
+Ejemplo: si "acp.com.co/afiliados" da 404, busca: web_search("ACP Colombia directorio empresas afiliadas")
+```
+
+---
+
+### ✅ Fase 6 — Corrección de bugs del Researcher + Loop Groq (COMPLETADA)
+
+**Archivos modificados:**
+- `backend/app/agents/researcher.py` — prompt + modelo
+- `backend/app/agents/base.py` — `_loop_groq`, `_groq_post`, `_trim_groq_context`, `_groq_max_chars_*`
+
+**Checklist:**
+- [x] **researcher.py:** Cambiar `groq_model` a `llama-3.3-70b-versatile`
+- [x] **researcher.py:** Eliminar todas las URLs hardcodeadas del prompt
+- [x] **researcher.py:** Restructurar prompt para forzar `web_search` como primer paso obligatorio
+- [x] **researcher.py:** Agregar regla "si 404, no pruebes rutas del mismo dominio, usa web_search"
+- [x] **researcher.py:** Reducir `max_tool_calls` a `8` (override en la subclase)
+- [x] **base.py:** Corregir el guardia `max_tool_calls` — usar `tool_choice: none` para forzar respuesta final
+- [x] **base.py:** Reducir `_groq_max_chars_search = 800` y `_groq_max_chars_fetch = 1000`
+- [x] **base.py:** Mejorar `_trim_groq_context` — paso 1 trunca contenido a 300 chars, paso 2 elimina pares assistant+tool más viejos si sigue grande
+- [x] **base.py:** Agregar `parallel_tool_calls: False` — evita que el modelo haga 20+ búsquedas paralelas por turno
+- [x] **base.py:** Implementar fallback `_web_search_duckduckgo` — si Tavily falla, usa DuckDuckGo HTML automáticamente
+- [x] **docker-compose.yml:** Agregar `TAVILY_API_KEY` en environment de backend y worker
+- [x] Runs de prueba realizados — researcher usa Tavily correctamente, sin 413 en cascada
+
+---
+
+---
+
+## 12. Bugs Detectados en Monitoreo Live — 2026-05-25 (segunda sesión)
+
+> Observados monitoreando runs reales en vivo. Todos corregidos en la misma sesión.
+
+### Bug A — `TAVILY_API_KEY` no llegaba al contenedor Docker
+
+**Archivos:** `docker-compose.yml`
+
+**Síntomas:** Cada llamada a `web_search` devolvía HTTP 401 Unauthorized de `api.tavily.com`. El modelo Groq recibía el error y respondía en texto libre: *"Lo siento, no puedo proporcionar resultados"* → `_extract_json` fallaba → pipeline fallaba tras 5 reintentos.
+
+**Causa:** `TAVILY_API_KEY` existía en `.env` pero el bloque `environment:` del worker y el backend en `docker-compose.yml` no la declaraba. Docker Compose solo pasa variables que están explícitamente listadas en `environment:`.
+
+**Fix:** Agregar `TAVILY_API_KEY: ${TAVILY_API_KEY:-}` en la sección `environment` de ambos servicios (`backend` y `worker`) en `docker-compose.yml`. Recrear los contenedores con `docker compose up -d --no-build backend worker`.
+
+---
+
+### Bug B — Sin fallback si Tavily falla
+
+**Archivo:** `backend/app/agents/base.py`, función `_web_search`
+
+**Síntomas:** Cualquier falla de Tavily (401, 429, timeout) dejaba al agente sin capacidad de búsqueda.
+
+**Fix:** Implementar fallback automático Tavily → DuckDuckGo HTML:
+```python
+def _web_search(query, max_chars):
+    if settings.tavily_api_key:
+        try:
+            return _web_search_tavily(query, max_chars)  # intento primario
+        except Exception:
+            pass
+    return _web_search_duckduckgo(query, max_chars)  # fallback gratuito
+```
+`_web_search_duckduckgo` hace POST a `html.duckduckgo.com/html/` sin API key y extrae títulos + URLs + snippets con regex.
+
+---
+
+### Bug C — `parallel_tool_calls` causaba 181+ búsquedas Tavily por run
+
+**Archivo:** `backend/app/agents/base.py`, método `_groq_post`
+
+**Síntomas observados:** Un run consumió 181 llamadas a Tavily (free tier = 1000/mes → 5 runs máximo). El ratio fue 181 Tavily : 16 Groq = ~11 búsquedas paralelas por turno Groq.
+
+**Causa:** `llama-3.3-70b-versatile` con `tool_choice: auto` solicita 10-20 tool calls **en paralelo** en una sola respuesta. El código ejecutaba todos antes de revisar el límite `max_tool_calls`. Con 5 reintentos del outer loop, se acumulaban 150-200 búsquedas.
+
+**Impacto secundario:** 181 tool results × 800 chars = ~145,000 chars de contexto → 413 Payload Too Large inevitable.
+
+**Fix:** Agregar `parallel_tool_calls: False` en el payload de Groq:
+```python
+payload["parallel_tool_calls"] = False  # una herramienta por turno
+```
+Con esto, el modelo llama **una herramienta a la vez**, espera el resultado y decide si necesita otra. Máximo `max_tool_calls` búsquedas por run.
+
+---
+
+### Bug D — `_trim_groq_context` no reducía suficiente el payload
+
+**Archivo:** `backend/app/agents/base.py`, método `_trim_groq_context`
+
+**Síntomas:** 20+ errores 413 consecutivos (Groq). El trim eliminaba mensajes enteros pero el payload seguía sobre el límite. El run fallaba después de 5 reintentos × 6 intentos de trim = 30 errores 413.
+
+**Causa:** La versión anterior eliminaba el 40% más viejo de los tool result messages. Si quedan pocos mensajes pero con contenido largo (1000 chars c/u), el payload sigue siendo enorme.
+
+**Fix en dos pasos:**
+1. **Paso 1 — truncar contenido:** Recorta el `content` de **todos** los tool results a máximo 300 chars. Esto reduce drásticamente el tamaño sin eliminar mensajes (el modelo recuerda qué buscó).
+2. **Paso 2 — eliminar si sigue grande:** Si el total estimado sigue > 40,000 chars, elimina el 50% más viejo de los pares assistant+tool.
+
+Además se redujeron los límites preventivos: `_groq_max_chars_search: 1500 → 800` y `_groq_max_chars_fetch: 2000 → 1000`.
+
+---
+
+### Bug E — Barra de progreso SSE siempre en 0%
+
+**Archivos:** `backend/app/routers/sse.py`, `frontend/src/lib/hooks/use-run-sse.ts`, `frontend/src/components/runs/run-progress-row.tsx`
+
+**Síntomas:** La barra de progreso se quedaba en 0% durante toda la ejecución. El backend avanzaba (5% → 20% → 40%...) pero el frontend no lo reflejaba.
+
+**Causa — dos desconexiones en cadena:**
+
+1. **`sse.py` no enviaba el campo `event:` SSE.** Enviaba:
+   ```
+   data: {"event": "step_start", "data": {...}}
+   ```
+   Pero el frontend usaba `addEventListener('run_update', ...)` que requiere:
+   ```
+   event: run_update
+   data: {...}
+   ```
+   Sin el campo `event:`, el navegador nunca dispara los listeners nombrados.
+
+2. **Formato de datos incorrecto.** El frontend esperaba un objeto `Run` completo, pero el backend enviaba `{event, data: {step, progress, message}}`.
+
+**Fix en tres archivos:**
+
+- **`sse.py`:** Mapear el evento interno al tipo SSE correcto y emitir el campo `event:`:
+  ```python
+  sse_event = {"completed": "run_completed", "failed": "run_failed"}.get(internal_event, "run_update")
+  yield f"event: {sse_event}\ndata: {data}\n\n"
+  ```
+
+- **`use-run-sse.ts`:** Cambiar `onUpdate` de `(run: Run)` a `(update: SseRunUpdate)` y parsear el formato real:
+  ```typescript
+  onUpdate({ id: runId, progress_pct: d.progress, current_step: d.message, status: 'running' })
+  ```
+
+- **`run-progress-row.tsx`:** Hacer merge del update parcial con el estado local del run (no reemplazo completo):
+  ```typescript
+  setRun(prev => ({ ...prev, ...update }))
+  ```
+
+---
+
+## 13. Variables de Entorno Requeridas
 
 ```bash
 POSTGRES_PASSWORD=        # contraseña del contenedor PostgreSQL
-ANTHROPIC_API_KEY=        # console.anthropic.com — requerido desde Fase 2
-RESEND_API_KEY=           # resend.com — requerido en Fase 3
-SLACK_WEBHOOK_URL=        # api.slack.com/messaging/webhooks — requerido en Fase 3
+AI_PROVIDER=              # "anthropic" (pago) o "groq" (gratuito)
+ANTHROPIC_API_KEY=        # console.anthropic.com — requerido si AI_PROVIDER=anthropic
+GROQ_API_KEY=             # console.groq.com — requerido si AI_PROVIDER=groq (gratis)
+TAVILY_API_KEY=           # tavily.com — requerido para web_search (1000 búsquedas/mes gratis)
+RESEND_API_KEY=           # resend.com — opcional, para notificaciones email
+RESEND_TO_EMAIL=          # email destino de notificaciones
+SLACK_WEBHOOK_URL=        # opcional, para notificaciones Slack
 NEXT_PUBLIC_API_URL=      # http://localhost:8000 en desarrollo
 ```
 
-## 12. Comandos Útiles
+> **Importante:** Todas las variables deben estar en `.env` **Y** declaradas en la sección `environment:` del servicio correspondiente en `docker-compose.yml`. Si solo están en `.env` sin el `environment:`, el contenedor no las recibe.
+
+## 14. Comandos Útiles
 
 ```bash
 # Levantar todo
