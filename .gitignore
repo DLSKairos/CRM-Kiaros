@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+*.env.local
+
+# Output files — nunca commitear excels generados
+output/*.xlsx
+output/*.xls
+!output/.gitkeep
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+frontend/.env.local
+frontend/out/
+
+# IDE
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Logs
+*.log
+celerybeat-schedule
+celerybeat.pid
+
+# Alembic
+backend/alembic/versions/*.pyc
