@@ -16,15 +16,29 @@ Recibirás:
 
 ## Fuentes a consultar (en este orden de prioridad)
 
-1. **RUES** — `rues.confecamaras.co` — registro de empresas colombianas por actividad CIIU
-2. **Supersociedades** — `supersociedades.gov.co` — empresas vigiladas con info financiera
-3. **Directorios sectoriales:**
-   - Construcción: Camacol (`camacol.co`), Infraestructura (`infraestructura.org.co`)
-   - Oil & Gas: ACP (`acp.com.co`), Naturgas
-   - Utilities: Andesco (`andesco.org.co`)
-   - Minería: ANM (`anm.gov.co`)
-4. **LinkedIn** — búsqueda de empresas por sector + Bogotá/Colombia
-5. **Web general** — búsquedas como `"empresas [sector] Bogotá" site:co`
+1. **Web general con DuckDuckGo** — tu fuente principal. Queries como:
+   - `empresas constructoras Bogotá Colombia obras civiles HSEQ`
+   - `empresas minería carbón Cundinamarca Colombia operaciones campo`
+   - Usa variaciones para encontrar empresas distintas en cada búsqueda
+
+2. **Directorios sectoriales** — URLs exactas verificadas:
+   - Construcción/Obras civiles: `https://camacol.co/nosotros/afiliados` (afiliados Camacol)
+   - Infraestructura: `https://infraestructura.org.co` (homepage, navega desde ahí)
+   - Oil & Gas: `https://acp.com.co` — busca sección "afiliados" o "empresas"
+   - Utilities: `https://andesco.org.co` — busca sección empresas asociadas
+   - Minería: `https://anm.gov.co` — registro nacional minero
+
+3. **RUES** — busca vía DuckDuckGo: `site:rues.confecamaras.co [sector] Bogotá`
+   (el sitio no tiene buscador directo accessible, usa Google/DDG)
+
+4. **LinkedIn** — NO intentes acceder directamente a linkedin.com (requiere login).
+   En cambio, busca perfiles de empresa vía DuckDuckGo:
+   - `site:linkedin.com/company "[sector]" Bogotá Colombia`
+   - `"linkedin.com/company" constructora Bogotá Colombia`
+   Extrae el nombre y URL del perfil desde los resultados de búsqueda sin visitar LinkedIn.
+
+5. **Páginas web de empresas** — una vez identificadas, visita su web con `web_fetch`
+   para validar que son reales y extraer datos básicos.
 
 ## Criterios de inclusión
 
@@ -48,11 +62,15 @@ Para cada fuente:
 4. Extrae los datos disponibles
 
 Queries de ejemplo útiles:
-- `constructoras medianas Bogotá Colombia obras civiles`
-- `empresas minería carbón Cundinamarca Colombia`
-- `operadoras oil gas Colombia Bogotá`
-- `site:rues.confecamaras.co [sector] Bogotá`
-- `"HSE" OR "HSEQ" empresa [sector] Bogotá contratación`
+- `constructoras medianas Bogotá Colombia obras civiles permisos trabajo`
+- `empresas minería carbón Cundinamarca Colombia operaciones campo`
+- `operadoras oil gas Colombia Bogotá HSE HSEQ`
+- `"HSE" OR "HSEQ" empresa construcción Bogotá Colombia`
+- `site:linkedin.com/company constructora Bogotá Colombia`
+- `empresas construcción infraestructura Cundinamarca Colombia empleados campo`
+
+**IMPORTANTE:** Usa máximo 2-3 búsquedas por fuente y avanza a la siguiente.
+No repitas búsquedas similares. Prioriza cantidad y variedad de empresas sobre profundidad.
 
 ## Output requerido
 

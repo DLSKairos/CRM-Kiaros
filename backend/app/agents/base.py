@@ -155,9 +155,11 @@ class AgentBase(ABC):
 
     max_tokens: int = 4096
     max_retries: int = 5
+    # Máximo de tool calls por ejecución — evita bucles infinitos con Groq
+    max_tool_calls: int = 12
     # Tamaño máximo de contenido web enviado al LLM (Groq tiene límites de tokens más ajustados)
-    _groq_max_chars_search: int = 2500
-    _groq_max_chars_fetch: int = 3000
+    _groq_max_chars_search: int = 2000
+    _groq_max_chars_fetch: int = 2500
 
     def __init__(self) -> None:
         self._provider = settings.ai_provider.lower()
@@ -192,6 +194,7 @@ class AgentBase(ABC):
 
     def _loop_anthropic(self, user_message: str) -> dict | list:
         messages: list[dict] = [{"role": "user", "content": user_message}]
+        tool_calls_count = 0
 
         while True:
             response = self._anthropic.messages.create(
@@ -214,6 +217,7 @@ class AgentBase(ABC):
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
+                        tool_calls_count += 1
                         result = _run_tool(block.name, block.input)
                         tool_results.append({
                             "type": "tool_result",
@@ -221,6 +225,14 @@ class AgentBase(ABC):
                             "content": result,
                         })
                 messages.append({"role": "user", "content": tool_results})
+                if tool_calls_count >= self.max_tool_calls:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Has usado suficientes búsquedas. "
+                            "Devuelve AHORA el JSON final con los datos que encontraste."
+                        ),
+                    })
                 continue
 
             raise ValueError(f"stop_reason inesperado: {response.stop_reason}")
@@ -232,6 +244,7 @@ class AgentBase(ABC):
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_message},
         ]
+        tool_calls_count = 0
 
         with httpx.Client(timeout=60) as client:
             while True:
@@ -247,6 +260,7 @@ class AgentBase(ABC):
                     return _extract_json(msg.get("content") or "")
 
                 if choice["finish_reason"] == "tool_calls":
+                    tool_calls_count += len(msg.get("tool_calls", []))
                     tool_results = []
                     for tc in msg.get("tool_calls", []):
                         fn = tc["function"]
@@ -263,6 +277,17 @@ class AgentBase(ABC):
                             "content": result,
                         })
                     messages.extend(tool_results)
+
+                    # Si superó el límite, forzar respuesta final con lo que tiene
+                    if tool_calls_count >= self.max_tool_calls:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Has usado suficientes búsquedas. "
+                                "Devuelve AHORA el JSON final con los datos que encontraste. "
+                                "No hagas más búsquedas."
+                            ),
+                        })
                     continue
 
                 raise ValueError(f"finish_reason inesperado: {choice['finish_reason']}")
