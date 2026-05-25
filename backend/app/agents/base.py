@@ -368,8 +368,19 @@ class AgentBase(ABC):
                 json=payload,
             )
             if resp.status_code == 429:
-                retry_after = int(resp.headers.get("retry-after", min(60, 5 * (attempt + 1))))
+                # Cap en 90s: Groq free tier puede mandar retry-after de minutos/horas
+                # cuando agota el límite diario de tokens — sin cap, el worker duerme
+                # 17+ minutos sin avisarle nada al frontend ni al usuario.
+                raw_retry = int(resp.headers.get("retry-after", 5 * (attempt + 1)))
+                retry_after = min(raw_retry, 90)
                 last_status = resp.status_code
+                # Si el retry-after real era muy largo, es límite diario — fallar rápido
+                if raw_retry > 90:
+                    raise RuntimeError(
+                        f"Límite diario de tokens de Groq alcanzado "
+                        f"(retry-after={raw_retry}s ≈ {raw_retry//60}min). "
+                        f"Espera a mañana o cambia AI_PROVIDER=anthropic en .env"
+                    )
                 time.sleep(retry_after)
                 continue
             if resp.status_code == 413:
