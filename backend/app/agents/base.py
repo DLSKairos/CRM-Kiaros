@@ -391,7 +391,7 @@ class AgentBase(ABC):
                 time.sleep(2)
                 continue
             resp.raise_for_status()
-            time.sleep(2)  # cooldown preventivo: evita agotar el bucket tokens/min de Groq
+            time.sleep(10)  # cooldown preventivo: Groq free tier necesita ~25-30s para recuperar
             return resp
         raise RuntimeError(f"Groq no respondió tras 6 intentos (último status HTTP: {last_status})")
 

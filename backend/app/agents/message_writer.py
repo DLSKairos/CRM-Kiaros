@@ -114,8 +114,8 @@ Para cada contacto:
 class MessageWriter(AgentBase):
     """Genera mensajes de prospección personalizados por empresa, contacto y canal."""
 
-    # message_writer usa Sonnet: los mensajes en español colombiano necesitan más calidad
-    anthropic_model = "claude-sonnet-4-6"
+    # Haiku para validar el pipeline; cambiar a "claude-sonnet-4-6" en producción para mayor calidad
+    anthropic_model = "claude-haiku-4-5-20251001"
     groq_model = "llama-3.3-70b-versatile"
 
     @property
