@@ -253,6 +253,8 @@ class AgentBase(ABC):
                 max_tokens=self.max_tokens,
                 system=self.system_prompt,
                 tools=_TOOLS_ANTHROPIC,
+                # Una herramienta por turno: evita ráfagas de 5-7 Tavily simultáneos
+                tool_choice={"type": "auto", "disable_parallel_tool_use": True},
                 messages=messages,
             )
 
@@ -276,7 +278,10 @@ class AgentBase(ABC):
                             "content": result,
                         })
                 messages.append({"role": "user", "content": tool_results})
+
                 if tool_calls_count >= self.max_tool_calls:
+                    # Forzar respuesta final sin tools disponibles — Claude no puede
+                    # hacer más tool_use si no se pasa el parámetro tools
                     messages.append({
                         "role": "user",
                         "content": (
@@ -284,6 +289,17 @@ class AgentBase(ABC):
                             "Devuelve AHORA el JSON final con los datos que encontraste."
                         ),
                     })
+                    final_response = self._anthropic.messages.create(
+                        model=self.anthropic_model,
+                        max_tokens=self.max_tokens,
+                        system=self.system_prompt,
+                        messages=messages,
+                    )
+                    for block in final_response.content:
+                        if hasattr(block, "text"):
+                            return _extract_json(block.text)
+                    raise ValueError("Respuesta final sin bloque de texto")
+
                 continue
 
             raise ValueError(f"stop_reason inesperado: {response.stop_reason}")
