@@ -3,14 +3,23 @@
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
-from app.schemas.company import CompanyList, CompanyPipelineUpdate, CompanyRead
+from app.schemas.company import CompanyCreate, CompanyList, CompanyPipelineUpdate, CompanyRead
 from app.services import company_service
 
 router = APIRouter(prefix="/companies", tags=["companies"])
+
+
+@router.post("", response_model=CompanyRead, status_code=status.HTTP_201_CREATED)
+async def create_company(
+    data: CompanyCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Crea una empresa manualmente, sin pasar por el pipeline de agentes."""
+    return await company_service.create_company(session, data)
 
 
 @router.get("", response_model=CompanyList)
@@ -47,6 +56,17 @@ async def get_company(company_id: uuid.UUID, session: AsyncSession = Depends(get
     if not company:
         raise HTTPException(status_code=404, detail="Empresa no encontrada")
     return company
+
+
+@router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_company(
+    company_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    """Elimina una empresa y sus datos asociados."""
+    deleted = await company_service.delete_company(session, company_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
 
 
 @router.patch("/{company_id}/pipeline", response_model=CompanyRead)

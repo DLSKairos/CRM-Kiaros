@@ -10,8 +10,8 @@ class Contact(SQLModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     company_id: uuid.UUID = Field(foreign_key="companies.id", index=True)
-    run_id: uuid.UUID = Field(foreign_key="runs.id", index=True)
-    external_id: str  # 'C001' asignado por el agente
+    run_id: Optional[uuid.UUID] = Field(default=None, foreign_key="runs.id", index=True)
+    external_id: str = Field(default="")  # 'C001' asignado por el agente; vacío para entradas manuales
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     nombre: str

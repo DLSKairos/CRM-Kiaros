@@ -5,9 +5,26 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+class CompanyCreate(BaseModel):
+    nombre_empresa: str
+    sector: str
+    ciudad: str
+    nit: Optional[str] = None
+    web: Optional[str] = None
+    linkedin_empresa: Optional[str] = None
+    tamano_estimado: Optional[str] = None
+    email_generico_empresa: Optional[str] = None
+    telefono_empresa: Optional[str] = None
+    contexto_adicional: Optional[str] = None
+    pipeline_stage: str = "prospecto"
+    responsable_comercial: Optional[str] = None
+    notas_comercial: Optional[str] = None
+    score: Optional[float] = None
+
+
 class CompanyRead(BaseModel):
     id: uuid.UUID
-    run_id: uuid.UUID
+    run_id: Optional[uuid.UUID]
     external_id: str
     created_at: datetime
     nombre_empresa: str

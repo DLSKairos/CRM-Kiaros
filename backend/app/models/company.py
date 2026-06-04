@@ -9,7 +9,7 @@ class Company(SQLModel, table=True):
     __tablename__ = "companies"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    run_id: uuid.UUID = Field(foreign_key="runs.id")
+    run_id: Optional[uuid.UUID] = Field(default=None, foreign_key="runs.id")
     external_id: str = Field(index=True)  # 'E001' asignado por el agente
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

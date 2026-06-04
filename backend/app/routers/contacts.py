@@ -3,14 +3,23 @@
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
-from app.schemas.contact import ContactList
+from app.schemas.contact import ContactCreate, ContactList, ContactRead
 from app.services import contact_service
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
+
+
+@router.post("", response_model=ContactRead, status_code=status.HTTP_201_CREATED)
+async def create_contact(
+    data: ContactCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Crea un contacto manualmente para una empresa existente."""
+    return await contact_service.create_contact(session, data)
 
 
 @router.get("", response_model=ContactList)

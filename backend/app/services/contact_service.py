@@ -7,6 +7,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import func, select
 
 from app.models.contact import Contact
+from app.schemas.contact import ContactCreate
+
+
+async def create_contact(session: AsyncSession, data: ContactCreate) -> Contact:
+    import uuid as _uuid
+
+    contact = Contact(
+        external_id=f"M-{_uuid.uuid4().hex[:8].upper()}",
+        fuente="manual",
+        run_id=None,
+        company_id=data.company_id,
+        nombre=data.nombre,
+        cargo=data.cargo,
+        cargo_prioridad=data.cargo_prioridad,
+        email=data.email,
+        linkedin=data.linkedin,
+        telefono=data.telefono,
+    )
+    session.add(contact)
+    await session.commit()
+    await session.refresh(contact)
+    return contact
 
 
 async def list_contacts(

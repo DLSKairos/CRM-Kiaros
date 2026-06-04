@@ -4,11 +4,14 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import func, select
 
 from app.models.company import Company
-from app.schemas.company import CompanyPipelineUpdate
+from app.models.contact import Contact
+from app.models.message import Message
+from app.schemas.company import CompanyCreate, CompanyPipelineUpdate
 
 _VALID_STAGES = {"prospecto", "contactado", "demo", "negociación", "cerrado", "descartado"}
 
@@ -71,6 +74,63 @@ async def update_pipeline(
     await session.commit()
     await session.refresh(company)
     return company
+
+
+async def create_company(session: AsyncSession, data: CompanyCreate) -> Company:
+    import uuid as _uuid
+
+    score = data.score
+    if score is not None:
+        if score >= 8:
+            clasificacion = "caliente"
+        elif score >= 6:
+            clasificacion = "tibio"
+        else:
+            clasificacion = "frio"
+    else:
+        clasificacion = None
+
+    company = Company(
+        external_id=f"M-{_uuid.uuid4().hex[:8].upper()}",
+        fuente="manual",
+        incluir_en_pipeline=True,
+        run_id=None,
+        nombre_empresa=data.nombre_empresa,
+        sector=data.sector,
+        ciudad=data.ciudad,
+        nit=data.nit,
+        web=data.web,
+        linkedin_empresa=data.linkedin_empresa,
+        tamano_estimado=data.tamano_estimado,
+        email_generico_empresa=data.email_generico_empresa,
+        telefono_empresa=data.telefono_empresa,
+        contexto_adicional=data.contexto_adicional,
+        pipeline_stage=data.pipeline_stage or "prospecto",
+        responsable_comercial=data.responsable_comercial,
+        notas_comercial=data.notas_comercial,
+        score=score,
+        clasificacion=clasificacion,
+    )
+    session.add(company)
+    await session.commit()
+    await session.refresh(company)
+    return company
+
+
+async def delete_company(session: AsyncSession, company_id: uuid.UUID) -> bool:
+    company = await session.get(Company, company_id)
+    if not company:
+        return False
+
+    # Orden de borrado respetando FK constraints:
+    # 1. Mensajes (FK a contacts y a companies)
+    await session.execute(sa_delete(Message).where(Message.company_id == company_id))
+    # 2. Contactos (FK a companies)
+    await session.execute(sa_delete(Contact).where(Contact.company_id == company_id))
+    # 3. Empresa
+    await session.delete(company)
+    await session.commit()
+    return True
 
 
 async def get_kanban_board(session: AsyncSession, run_id: Optional[uuid.UUID] = None) -> dict:
