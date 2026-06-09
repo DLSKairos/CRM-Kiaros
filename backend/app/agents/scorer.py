@@ -116,7 +116,8 @@ Devuelve **exclusivamente** un JSON con este formato:
 
 - Sé honesto en el scoring — no infles scores para cumplir cuota
 - La justificación debe ser de 1–2 oraciones concretas, no genéricas
-- Si usas web_search para verificar un dato antes de puntuar, hazlo
+- **NO uses web_search** — puntúa exclusivamente con los datos que el enricher ya recopiló. El enriquecimiento previo ya buscó toda la información disponible.
+- Excepción única: si el campo `sector` de una empresa está vacío o es "Desconocido", puedes hacer 1 búsqueda para determinarlo.
 - Siempre incluye `incluir_en_pipeline: false` para score < 3
 """.strip()
 
@@ -125,7 +126,8 @@ class LeadScorer(AgentBase):
     """Califica cada lead según su fit con el ICP de SEÑAL."""
 
     anthropic_model = "claude-haiku-4-5-20251001"
-    groq_model = "llama-3.1-8b-instant"
+    groq_model = "llama-3.3-70b-versatile"
+    max_tool_calls: int = 4  # scorer puntúa con datos ya recolectados — no necesita muchas búsquedas
 
     @property
     def system_prompt(self) -> str:

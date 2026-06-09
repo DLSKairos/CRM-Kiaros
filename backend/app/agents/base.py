@@ -278,6 +278,7 @@ class AgentBase(ABC):
                             "content": result,
                         })
                 messages.append({"role": "user", "content": tool_results})
+                time.sleep(1)  # cooldown preventivo: evita agotar el bucket RPM de Anthropic
 
                 if tool_calls_count >= self.max_tool_calls:
                     # Forzar respuesta final sin tools disponibles — Claude no puede
